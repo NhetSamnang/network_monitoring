@@ -10,97 +10,61 @@ const db = require("./db");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-const ALLOWED_CATEGORIES = ["POS Master", "CCTV"];
+// ========================================
+// Configuration
+// ========================================
+
+const ALLOWED_CATEGORIES = [
+  "POS Master",
+  "POS Client",
+  "CCTV",
+  "Fingerprint",
+];
+
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:5174",
+  process.env.FRONTEND_URL,
+].filter(Boolean);
 
 app.use(
   cors({
-    origin: [
-      "http://localhost:5173",
-      "http://localhost:5174",
-    ],
+    origin: allowedOrigins,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
 app.use(express.json());
 
-// Check whether a device responds to a Windows ping.
-function pingDevice(device) {
-  return new Promise((resolve) => {
-    if (!isIP(device.ip)) {
-      return resolve({
-        ...device,
-        status: "Offline",
-        lastChecked: new Date(),
-      });
-    }
+// ========================================
+// Health Check
+// ========================================
 
-    execFile(
-      "ping",
-      ["-n", "1", "-w", "1500", device.ip],
-      { timeout: 2500, windowsHide: true },
-      (error) => {
-        resolve({
-          ...device,
-          status: error ? "Offline" : "Online",
-          lastChecked: new Date(),
-        });
-      }
-    );
-  });
-}
+app.get("/api/health", async (req, res) => {
+  try {
+    await db.query("SELECT 1");
 
-// Prevent overlapping full network checks.
-let checkPromise = null;
+    res.json({
+      success: true,
+      message: "Network monitoring backend is running",
+      database: "Connected",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Health check error:", error.message);
 
-async function checkAllDevices() {
-  if (checkPromise) return checkPromise;
+    res.status(500).json({
+      success: false,
+      message: "Backend is running, but database connection failed.",
+    });
+  }
+});
 
-  checkPromise = (async () => {
-    const [devices] = await db.query(
-      "SELECT * FROM devices ORDER BY id"
-    );
+// ========================================
+// Validate Device Data
+// ========================================
 
-    const results = await Promise.all(
-      devices.map(pingDevice)
-    );
-
-    // Save each device's latest status in MySQL.
-    await Promise.all(
-      results.map((device) =>
-        db.execute(
-          `UPDATE devices
-           SET status = ?, lastChecked = ?
-           WHERE id = ?`,
-          [
-            device.status,
-            device.lastChecked,
-            device.id,
-          ]
-        )
-      )
-    );
-
-    const online = results.filter(
-      (device) => device.status === "Online"
-    ).length;
-
-    console.log(
-      `[${new Date().toLocaleString()}] Checked ${
-        results.length
-      } devices: ${online} online, ${
-        results.length - online
-      } offline`
-    );
-
-    return results;
-  })().finally(() => {
-    checkPromise = null;
-  });
-
-  return checkPromise;
-}
-
-// Validate device form data.
 function validateDevice(body) {
   const name =
     typeof body.name === "string" ? body.name.trim() : "";
@@ -123,28 +87,132 @@ function validateDevice(body) {
   }
 
   if (!isIP(ip)) {
-    return { error: "Please enter a valid IP address." };
+    return {
+      error: "Please enter a valid IPv4 or IPv6 address.",
+    };
   }
 
   if (!ALLOWED_CATEGORIES.includes(category)) {
     return {
-      error: "Category must be POS Master or CCTV.",
+      error: "Invalid device category.",
     };
   }
 
   return {
-    value: { name, ip, type, category },
+    value: {
+      name,
+      ip,
+      type,
+      category,
+    },
   };
 }
 
-// Health check.
-app.get("/api/health", (req, res) => {
-  res.json({
-    message: "Network monitoring backend is running",
-  });
-});
+// ========================================
+// Ping One Device
+// ========================================
 
-// GET: Load all devices from MySQL.
+function pingDevice(device) {
+  return new Promise((resolve) => {
+    if (!isIP(device.ip)) {
+      return resolve({
+        ...device,
+        status: "Offline",
+        lastChecked: new Date(),
+      });
+    }
+
+    const isWindows = process.platform === "win32";
+    const isIPv6 = isIP(device.ip) === 6;
+
+    const args = isWindows
+      ? ["-n", "1", "-w", "1500", device.ip]
+      : [
+          "-n",
+          "-c",
+          "1",
+          ...(isIPv6 ? ["-6"] : []),
+          ...(isWindows ? [] : ["-W", "2"]),
+          device.ip,
+        ];
+
+    execFile(
+      "ping",
+      args,
+      {
+        timeout: 4000,
+        windowsHide: true,
+      },
+      (error) => {
+        resolve({
+          ...device,
+          status: error ? "Offline" : "Online",
+          lastChecked: new Date(),
+        });
+      }
+    );
+  });
+}
+
+// ========================================
+// Check All Devices
+// ========================================
+
+let checkPromise = null;
+
+async function checkAllDevices() {
+  if (checkPromise) {
+    return checkPromise;
+  }
+
+  checkPromise = (async () => {
+    const [devices] = await db.query(
+      "SELECT * FROM devices ORDER BY id"
+    );
+
+    const results = await Promise.all(
+      devices.map(pingDevice)
+    );
+
+    await Promise.all(
+      results.map((device) =>
+        db.execute(
+          `UPDATE devices
+           SET status = ?, lastChecked = ?
+           WHERE id = ?`,
+          [
+            device.status,
+            device.lastChecked,
+            device.id,
+          ]
+        )
+      )
+    );
+
+    const online = results.filter(
+      (device) => device.status === "Online"
+    ).length;
+
+    const offline = results.filter(
+      (device) => device.status === "Offline"
+    ).length;
+
+    console.log(
+      `[${new Date().toISOString()}] Checked ${results.length} devices: ${online} online, ${offline} offline`
+    );
+
+    return results;
+  })().finally(() => {
+    checkPromise = null;
+  });
+
+  return checkPromise;
+}
+
+// ========================================
+// GET: All Devices
+// ========================================
+
 app.get("/api/devices", async (req, res) => {
   try {
     const [devices] = await db.query(
@@ -154,13 +222,17 @@ app.get("/api/devices", async (req, res) => {
     res.json({ devices });
   } catch (error) {
     console.error("Load devices error:", error.message);
+
     res.status(500).json({
       message: "Failed to load devices from MySQL.",
     });
   }
 });
 
-// POST: Add a device to MySQL.
+// ========================================
+// POST: Add Device
+// ========================================
+
 app.post("/api/devices", async (req, res) => {
   try {
     const validation = validateDevice(req.body);
@@ -191,13 +263,17 @@ app.post("/api/devices", async (req, res) => {
     });
   } catch (error) {
     console.error("Add device error:", error.message);
+
     res.status(500).json({
       message: "Failed to add device to MySQL.",
     });
   }
 });
 
-// PUT: Update an existing device.
+// ========================================
+// PUT: Update Device
+// ========================================
+
 app.put("/api/devices/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -247,13 +323,17 @@ app.put("/api/devices/:id", async (req, res) => {
     });
   } catch (error) {
     console.error("Update device error:", error.message);
+
     res.status(500).json({
       message: "Failed to update device.",
     });
   }
 });
 
-// DELETE: Remove a device from MySQL.
+// ========================================
+// DELETE: Remove Device
+// ========================================
+
 app.delete("/api/devices/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -280,13 +360,17 @@ app.delete("/api/devices/:id", async (req, res) => {
     });
   } catch (error) {
     console.error("Delete device error:", error.message);
+
     res.status(500).json({
       message: "Failed to delete device.",
     });
   }
 });
 
-// POST: Check all devices.
+// ========================================
+// POST: Check All Devices Now
+// ========================================
+
 app.post("/api/check", async (req, res) => {
   try {
     const devices = await checkAllDevices();
@@ -297,16 +381,26 @@ app.post("/api/check", async (req, res) => {
     });
   } catch (error) {
     console.error("Network check error:", error.message);
+
     res.status(500).json({
       message: "Failed to check devices.",
     });
   }
 });
 
-// POST: Check one device by ID.
+// ========================================
+// POST: Check One Device
+// ========================================
+
 app.post("/api/devices/:id/check", async (req, res) => {
   try {
     const id = Number(req.params.id);
+
+    if (!Number.isInteger(id) || id < 1) {
+      return res.status(400).json({
+        message: "Invalid device ID.",
+      });
+    }
 
     const [rows] = await db.execute(
       "SELECT * FROM devices WHERE id = ?",
@@ -334,23 +428,74 @@ app.post("/api/devices/:id/check", async (req, res) => {
     });
   } catch (error) {
     console.error("Single device check error:", error.message);
+
     res.status(500).json({
       message: "Failed to check device.",
     });
   }
 });
 
-// Check immediately and then every 60 seconds.
+// ========================================
+// Handle Unknown API Routes
+// ========================================
+
+app.use("/api", (req, res) => {
+  res.status(404).json({
+    message: "API route not found.",
+  });
+});
+
+// ========================================
+// Handle Unexpected Errors
+// ========================================
+
+app.use((error, req, res, next) => {
+  console.error("Unexpected server error:", error.message);
+
+  if (res.headersSent) {
+    return next(error);
+  }
+
+  res.status(500).json({
+    message: "Internal server error.",
+  });
+});
+
+// ========================================
+// Automatic Network Checks
+// ========================================
+
+// Run once at startup, then every 60 seconds.
 checkAllDevices().catch((error) => {
   console.error("Initial network check failed:", error.message);
 });
 
-setInterval(() => {
+const monitoringTimer = setInterval(() => {
   checkAllDevices().catch((error) => {
     console.error("Scheduled network check failed:", error.message);
   });
 }, 60 * 1000);
 
-app.listen(PORT, () => {
-  console.log(`Backend running at http://localhost:${PORT}`);
+// ========================================
+// Start Server
+// ========================================
+
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Backend listening on port ${PORT}`);
 });
+
+// Allow a clean shutdown.
+function shutdown() {
+  clearInterval(monitoringTimer);
+
+  server.close(() => {
+    if (typeof db.end === "function") {
+      db.end().finally(() => process.exit(0));
+    } else {
+      process.exit(0);
+    }
+  });
+}
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);

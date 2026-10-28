@@ -1,7 +1,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-const API = "http://localhost:5000/api";
+
+const API = "https://network-monitoring-1-jzrx.onrender.com/api";
 
 const emptyForm = {
   name: "",

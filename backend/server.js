@@ -1,4 +1,3 @@
-
 require("dotenv").config();
 
 const express = require("express");
@@ -10,75 +9,54 @@ const db = require("./db");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// ========================================
-// Configuration
-// ========================================
-
-const ALLOWED_CATEGORIES = [
+const CATEGORIES = [
   "POS Master",
   "POS Client",
   "CCTV",
   "Fingerprint",
 ];
 
-const allowedOrigins = [
-  "http://localhost:5173",
-  "http://localhost:5174",
-  process.env.FRONTEND_URL,
-].filter(Boolean);
-
-app.use(
-  cors({
-    origin: allowedOrigins,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+app.use(cors({
+  origin: process.env.FRONTEND_URL
+    ? [
+        process.env.FRONTEND_URL,
+        "http://localhost:5173",
+        "http://localhost:5174",
+      ]
+    : true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
 
 app.use(express.json());
 
-// ========================================
-// Health Check
-// ========================================
-
+// Health check
 app.get("/api/health", async (req, res) => {
   try {
     await db.query("SELECT 1");
 
     res.json({
       success: true,
-      message: "Network monitoring backend is running",
+      message: "Backend and database connected",
       database: "Connected",
-      timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    console.error("Health check error:", error.message);
+    console.error("Database health check:", error.message);
 
     res.status(500).json({
       success: false,
-      message: "Backend is running, but database connection failed.",
+      message: "Database connection failed",
+      detail: error.message,
     });
   }
 });
 
-// ========================================
-// Validate Device Data
-// ========================================
-
+// Validate device
 function validateDevice(body) {
-  const name =
-    typeof body.name === "string" ? body.name.trim() : "";
-
-  const ip =
-    typeof body.ip === "string" ? body.ip.trim() : "";
-
-  const type =
-    typeof body.type === "string" ? body.type.trim() : "";
-
-  const category =
-    typeof body.category === "string"
-      ? body.category.trim()
-      : "";
+  const name = String(body.name || "").trim();
+  const ip = String(body.ip || "").trim();
+  const type = String(body.type || "").trim();
+  const category = String(body.category || "").trim();
 
   if (!name || !ip || !category) {
     return {
@@ -86,35 +64,29 @@ function validateDevice(body) {
     };
   }
 
-  if (!isIP(ip)) {
+  if (isIP(ip) !== 4) {
     return {
-      error: "Please enter a valid IPv4 or IPv6 address.",
+      error: "Enter a valid IPv4 address.",
     };
   }
 
-  if (!ALLOWED_CATEGORIES.includes(category)) {
+  if (!CATEGORIES.includes(category)) {
     return {
       error: "Invalid device category.",
     };
   }
 
   return {
-    value: {
-      name,
-      ip,
-      type,
-      category,
-    },
+    value: { name, ip, type, category },
   };
 }
 
-// ========================================
-// Ping One Device
-// ========================================
-
+// Ping a device
 function pingDevice(device) {
   return new Promise((resolve) => {
-    if (!isIP(device.ip)) {
+    const ip = String(device.ip || "");
+
+    if (isIP(ip) !== 4) {
       return resolve({
         ...device,
         status: "Offline",
@@ -122,27 +94,16 @@ function pingDevice(device) {
       });
     }
 
-    const isWindows = process.platform === "win32";
-    const isIPv6 = isIP(device.ip) === 6;
+    const windows = process.platform === "win32";
 
-    const args = isWindows
-      ? ["-n", "1", "-w", "1500", device.ip]
-      : [
-          "-n",
-          "-c",
-          "1",
-          ...(isIPv6 ? ["-6"] : []),
-          ...(isWindows ? [] : ["-W", "2"]),
-          device.ip,
-        ];
+    const args = windows
+      ? ["-n", "1", "-w", "1500", ip]
+      : ["-n", "-c", "1", "-W", "2", ip];
 
     execFile(
       "ping",
       args,
-      {
-        timeout: 4000,
-        windowsHide: true,
-      },
+      { timeout: 4000, windowsHide: true },
       (error) => {
         resolve({
           ...device,
@@ -154,65 +115,7 @@ function pingDevice(device) {
   });
 }
 
-// ========================================
-// Check All Devices
-// ========================================
-
-let checkPromise = null;
-
-async function checkAllDevices() {
-  if (checkPromise) {
-    return checkPromise;
-  }
-
-  checkPromise = (async () => {
-    const [devices] = await db.query(
-      "SELECT * FROM devices ORDER BY id"
-    );
-
-    const results = await Promise.all(
-      devices.map(pingDevice)
-    );
-
-    await Promise.all(
-      results.map((device) =>
-        db.execute(
-          `UPDATE devices
-           SET status = ?, lastChecked = ?
-           WHERE id = ?`,
-          [
-            device.status,
-            device.lastChecked,
-            device.id,
-          ]
-        )
-      )
-    );
-
-    const online = results.filter(
-      (device) => device.status === "Online"
-    ).length;
-
-    const offline = results.filter(
-      (device) => device.status === "Offline"
-    ).length;
-
-    console.log(
-      `[${new Date().toISOString()}] Checked ${results.length} devices: ${online} online, ${offline} offline`
-    );
-
-    return results;
-  })().finally(() => {
-    checkPromise = null;
-  });
-
-  return checkPromise;
-}
-
-// ========================================
-// GET: All Devices
-// ========================================
-
+// Get all devices
 app.get("/api/devices", async (req, res) => {
   try {
     const [devices] = await db.query(
@@ -221,18 +124,16 @@ app.get("/api/devices", async (req, res) => {
 
     res.json({ devices });
   } catch (error) {
-    console.error("Load devices error:", error.message);
+    console.error("GET devices:", error.message);
 
     res.status(500).json({
-      message: "Failed to load devices from MySQL.",
+      message: "Failed to load devices.",
+      detail: error.message,
     });
   }
 });
 
-// ========================================
-// POST: Add Device
-// ========================================
-
+// Add a device
 app.post("/api/devices", async (req, res) => {
   try {
     const validation = validateDevice(req.body);
@@ -262,18 +163,16 @@ app.post("/api/devices", async (req, res) => {
       device: rows[0],
     });
   } catch (error) {
-    console.error("Add device error:", error.message);
+    console.error("POST device:", error.message);
 
     res.status(500).json({
-      message: "Failed to add device to MySQL.",
+      message: "Failed to add device.",
+      detail: error.message,
     });
   }
 });
 
-// ========================================
-// PUT: Update Device
-// ========================================
-
+// Update a device
 app.put("/api/devices/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -297,7 +196,7 @@ app.put("/api/devices/:id", async (req, res) => {
       [id]
     );
 
-    if (existing.length === 0) {
+    if (!existing.length) {
       return res.status(404).json({
         message: "Device not found.",
       });
@@ -322,18 +221,16 @@ app.put("/api/devices/:id", async (req, res) => {
       device: rows[0],
     });
   } catch (error) {
-    console.error("Update device error:", error.message);
+    console.error("PUT device:", error.message);
 
     res.status(500).json({
       message: "Failed to update device.",
+      detail: error.message,
     });
   }
 });
 
-// ========================================
-// DELETE: Remove Device
-// ========================================
-
+// Delete a device
 app.delete("/api/devices/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -349,7 +246,7 @@ app.delete("/api/devices/:id", async (req, res) => {
       [id]
     );
 
-    if (result.affectedRows === 0) {
+    if (!result.affectedRows) {
       return res.status(404).json({
         message: "Device not found.",
       });
@@ -359,17 +256,48 @@ app.delete("/api/devices/:id", async (req, res) => {
       message: "Device deleted successfully.",
     });
   } catch (error) {
-    console.error("Delete device error:", error.message);
+    console.error("DELETE device:", error.message);
 
     res.status(500).json({
       message: "Failed to delete device.",
+      detail: error.message,
     });
   }
 });
 
-// ========================================
-// POST: Check All Devices Now
-// ========================================
+// Check all devices
+let checkPromise = null;
+
+async function checkAllDevices() {
+  if (checkPromise) return checkPromise;
+
+  checkPromise = (async () => {
+    const [devices] = await db.query(
+      "SELECT * FROM devices ORDER BY id"
+    );
+
+    const results = await Promise.all(
+      devices.map(pingDevice)
+    );
+
+    for (const device of results) {
+      await db.execute(
+        `UPDATE devices
+         SET status = ?, lastChecked = ?
+         WHERE id = ?`,
+        [device.status, device.lastChecked, device.id]
+      );
+    }
+
+    return results;
+  })();
+
+  try {
+    return await checkPromise;
+  } finally {
+    checkPromise = null;
+  }
+}
 
 app.post("/api/check", async (req, res) => {
   try {
@@ -380,18 +308,16 @@ app.post("/api/check", async (req, res) => {
       devices,
     });
   } catch (error) {
-    console.error("Network check error:", error.message);
+    console.error("Check devices:", error.message);
 
     res.status(500).json({
       message: "Failed to check devices.",
+      detail: error.message,
     });
   }
 });
 
-// ========================================
-// POST: Check One Device
-// ========================================
-
+// Check one device
 app.post("/api/devices/:id/check", async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -407,7 +333,7 @@ app.post("/api/devices/:id/check", async (req, res) => {
       [id]
     );
 
-    if (rows.length === 0) {
+    if (!rows.length) {
       return res.status(404).json({
         message: "Device not found.",
       });
@@ -423,34 +349,29 @@ app.post("/api/devices/:id/check", async (req, res) => {
     );
 
     res.json({
-      message: "Device check completed.",
+      message: "Device checked successfully.",
       device: result,
     });
   } catch (error) {
-    console.error("Single device check error:", error.message);
+    console.error("Check single device:", error.message);
 
     res.status(500).json({
       message: "Failed to check device.",
+      detail: error.message,
     });
   }
 });
 
-// ========================================
-// Handle Unknown API Routes
-// ========================================
-
+// Unknown API routes
 app.use("/api", (req, res) => {
   res.status(404).json({
     message: "API route not found.",
   });
 });
 
-// ========================================
-// Handle Unexpected Errors
-// ========================================
-
+// Unexpected errors
 app.use((error, req, res, next) => {
-  console.error("Unexpected server error:", error.message);
+  console.error("Server error:", error.message);
 
   if (res.headersSent) {
     return next(error);
@@ -461,41 +382,26 @@ app.use((error, req, res, next) => {
   });
 });
 
-// ========================================
-// Automatic Network Checks
-// ========================================
+// Start server only after testing database connectivity
+async function startServer() {
+  try {
+    await db.query("SELECT 1");
+    console.log("MySQL connected successfully.");
 
-// Run once at startup, then every 60 seconds.
-checkAllDevices().catch((error) => {
-  console.error("Initial network check failed:", error.message);
-});
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Backend running on port ${PORT}`);
+    });
 
-const monitoringTimer = setInterval(() => {
-  checkAllDevices().catch((error) => {
-    console.error("Scheduled network check failed:", error.message);
-  });
-}, 60 * 1000);
-
-// ========================================
-// Start Server
-// ========================================
-
-const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Backend listening on port ${PORT}`);
-});
-
-// Allow a clean shutdown.
-function shutdown() {
-  clearInterval(monitoringTimer);
-
-  server.close(() => {
-    if (typeof db.end === "function") {
-      db.end().finally(() => process.exit(0));
-    } else {
-      process.exit(0);
-    }
-  });
+    // Run a check every 60 seconds
+    setInterval(() => {
+      checkAllDevices().catch((error) => {
+        console.error("Scheduled check:", error.message);
+      });
+    }, 60000);
+  } catch (error) {
+    console.error("MySQL connection failed:", error.message);
+    process.exit(1);
+  }
 }
 
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+startServer();

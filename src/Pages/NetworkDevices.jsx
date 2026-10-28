@@ -1,22 +1,45 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+const API = "http://localhost:5000/api";
 
-const API = "https://network-monitoring-1-jzrx.onrender.com/api";
-
-const emptyForm = {
+const EMPTY_FORM = {
   name: "",
   ip: "",
   type: "",
   category: "POS Master",
 };
 
-const categories = [
+const CATEGORIES = [
   "POS Master",
   "POS Client",
   "CCTV",
   "Fingerprint",
 ];
+
+async function apiRequest(url, options = {}) {
+  let response;
+
+  try {
+    response = await fetch(url, options);
+  } catch {
+    throw new Error(
+      "Cannot connect to the backend. Check the server URL and network."
+    );
+  }
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const detail = data.detail ? ` (${data.detail})` : "";
+
+    throw new Error(
+      `${data.message || data.error || `HTTP ${response.status}`}${detail}`
+    );
+  }
+
+  return data;
+}
 
 export default function NetworkDevices({
   category,
@@ -26,31 +49,27 @@ export default function NetworkDevices({
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
-  const [form, setForm] = useState(emptyForm);
-  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState(EMPTY_FORM);
 
   const loadDevices = useCallback(async () => {
     try {
-      const response = await fetch(`${API}/devices`);
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-      const list = Array.isArray(data) ? data : data.devices;
+      const data = await apiRequest(`${API}/devices`);
+      const list = Array.isArray(data)
+        ? data
+        : data.devices;
 
       if (!Array.isArray(list)) {
-        throw new Error("Invalid device data");
+        throw new Error("Invalid device data returned by server.");
       }
 
       setDevices(list);
       setError("");
     } catch (err) {
-      setError(err.message || "Cannot connect to backend");
+      setError(err.message || "Unable to load devices.");
     } finally {
       setLoading(false);
     }
@@ -59,7 +78,7 @@ export default function NetworkDevices({
   useEffect(() => {
     loadDevices();
 
-    const timer = setInterval(loadDevices, 10000);
+    const timer = setInterval(loadDevices, 30000);
 
     return () => clearInterval(timer);
   }, [loadDevices]);
@@ -69,15 +88,9 @@ export default function NetworkDevices({
     setError("");
 
     try {
-      const response = await fetch(`${API}/check`, {
+      const data = await apiRequest(`${API}/check`, {
         method: "POST",
       });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
 
       if (Array.isArray(data.devices)) {
         setDevices(data.devices);
@@ -85,7 +98,7 @@ export default function NetworkDevices({
         await loadDevices();
       }
     } catch (err) {
-      setError(err.message || "Network check failed");
+      setError(err.message || "Network check failed.");
     } finally {
       setChecking(false);
     }
@@ -94,7 +107,7 @@ export default function NetworkDevices({
   function openAddForm() {
     setEditingId(null);
     setForm({
-      ...emptyForm,
+      ...EMPTY_FORM,
       category: category || "POS Master",
     });
     setShowForm(true);
@@ -116,7 +129,7 @@ export default function NetworkDevices({
   function closeForm() {
     setShowForm(false);
     setEditingId(null);
-    setForm(emptyForm);
+    setForm(EMPTY_FORM);
   }
 
   function handleChange(event) {
@@ -138,7 +151,7 @@ export default function NetworkDevices({
         ? `${API}/devices/${editingId}`
         : `${API}/devices`;
 
-      const response = await fetch(url, {
+      await apiRequest(url, {
         method: editingId ? "PUT" : "POST",
         headers: {
           "Content-Type": "application/json",
@@ -151,16 +164,10 @@ export default function NetworkDevices({
         }),
       });
 
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        throw new Error(data.message || data.error || `HTTP ${response.status}`);
-      }
-
       closeForm();
       await loadDevices();
     } catch (err) {
-      setError(err.message || "Unable to save device");
+      setError(err.message || "Unable to save device.");
     } finally {
       setSaving(false);
     }
@@ -168,7 +175,7 @@ export default function NetworkDevices({
 
   async function handleDelete(device) {
     const confirmed = window.confirm(
-      `Are you sure you want to delete "${device.name}" (${device.ip})?`
+      `Delete "${device.name}" (${device.ip})?`
     );
 
     if (!confirmed) return;
@@ -176,19 +183,13 @@ export default function NetworkDevices({
     setError("");
 
     try {
-      const response = await fetch(`${API}/devices/${device.id}`, {
+      await apiRequest(`${API}/devices/${device.id}`, {
         method: "DELETE",
       });
 
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        throw new Error(data.message || data.error || `HTTP ${response.status}`);
-      }
-
       await loadDevices();
     } catch (err) {
-      setError(err.message || "Unable to delete device");
+      setError(err.message || "Unable to delete device.");
     }
   }
 
@@ -210,15 +211,28 @@ export default function NetworkDevices({
         <h2>{title}</h2>
 
         <div className="device-actions">
-          <button onClick={openAddForm}>
+          <button type="button" onClick={openAddForm}>
             + Add Device
           </button>
 
-          <button onClick={checkNow} disabled={checking}>
+          <button
+            type="button"
+            onClick={checkNow}
+            disabled={checking}
+          >
             {checking ? "Checking..." : "Check Now"}
           </button>
         </div>
       </div>
+
+      {error && (
+        <div className="error" role="alert">
+          <strong>Error:</strong> {error}
+          <button type="button" onClick={loadDevices}>
+            Retry
+          </button>
+        </div>
+      )}
 
       {showForm && (
         <div className="device-form-panel">
@@ -240,12 +254,13 @@ export default function NetworkDevices({
               IP Address
               <input
                 name="ip"
+                type="text"
                 value={form.ip}
                 onChange={handleChange}
-                placeholder="Example: 192.168.1.20"
+                placeholder="192.168.1.20"
+                pattern="^(([0-9]{1,3})\.){3}[0-9]{1,3}$"
+                title="Enter an IPv4 address."
                 required
-                pattern="^(([0-9]{1,3})\.){3}([0-9]{1,3})$"
-                title="Enter an IPv4 address, such as 192.168.1.20"
               />
             </label>
 
@@ -255,7 +270,7 @@ export default function NetworkDevices({
                 name="type"
                 value={form.type}
                 onChange={handleChange}
-                placeholder="Example: Router, DVR, Printer"
+                placeholder="Router, DVR, Printer"
               />
             </label>
 
@@ -267,7 +282,7 @@ export default function NetworkDevices({
                 onChange={handleChange}
                 required
               >
-                {categories.map((item) => (
+                {CATEGORIES.map((item) => (
                   <option key={item} value={item}>
                     {item}
                   </option>
@@ -313,15 +328,9 @@ export default function NetworkDevices({
         </div>
       </div>
 
-      {loading && <p>Loading devices...</p>}
-
-      {error && (
-        <p className="error">
-          Error: {error}
-        </p>
-      )}
-
-      {!loading && (
+      {loading ? (
+        <p>Loading devices...</p>
+      ) : (
         <div className="table-wrap">
           <table>
             <thead>
